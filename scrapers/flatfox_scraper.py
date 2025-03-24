@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Set
 import time
-import pandas as pd
+import logging
 from selenium import webdriver
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.edge.options import Options
@@ -9,13 +9,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 from selenium.webdriver.remote.webelement import WebElement
-import config  # Import the entire module
+import config
 from tqdm import tqdm
 from models.scraper import Scraper
+from models.apartment_models import ApartmentListing, ApartmentDetails
 
 
 class FlatfoxScraper(Scraper):
-    def __init__(self, existing_urls: Set[str] = None):
+    def __init__(self, existing_urls: Set[str]):
         super().__init__(existing_urls)
         self.setup_browser()
 
@@ -24,21 +25,26 @@ class FlatfoxScraper(Scraper):
         options = Options()
         if config.HEADLESS_BROWSER:  # Access as config.VARIABLE
             options.add_argument("--headless")
+        options.add_argument("--lang=de-CH")
+        options.add_argument("--charset=UTF-8")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
         options.add_argument("--enable-unsafe-swiftshader")
+        options.add_argument("--log-level=3")
+        options.add_argument("--disable-logging")
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
         self.driver = webdriver.Edge(
             service=Service(EdgeChromiumDriverManager().install()), options=options
         )
 
-    def scrape_listings(self) -> List[Dict[str, str]]:
+    def scrape_listings(self) -> List[ApartmentListing]:
         """Scrape apartment listings from flatfox.ch"""
         print("Starting to scrape Flatfox listings...")
-        self.driver.get(config.SEARCH_URL)  # Access as config.VARIABLE
+        self.driver.get(config.FLATFOX_URL)  # Access as config.VARIABLE
 
         new_listings_count = 0
         existing_count = len(self.existing_urls)
@@ -56,7 +62,7 @@ class FlatfoxScraper(Scraper):
             # Cookie button might not appear if cookies are already accepted
             pass
 
-        apartments: List[Dict[str, str]] = []
+        apartments: List[ApartmentListing] = []
         pages_loaded: int = 1
 
         # Continue loading more pages until reaching the maximum or no more results
@@ -67,7 +73,6 @@ class FlatfoxScraper(Scraper):
             )
 
             # Process current cards
-            # ...existing code...
 
             print(
                 f"Loaded page {pages_loaded} - found {len(property_cards)} listings so far"
@@ -121,6 +126,10 @@ class FlatfoxScraper(Scraper):
                 )
                 url = link_element.get_attribute("href")
 
+                if url is None:
+                    logging.error("No URL found for this listing")
+                    continue
+
                 # Skip if already in our database
                 if url in self.existing_urls:
                     continue
@@ -149,12 +158,12 @@ class FlatfoxScraper(Scraper):
                     price_container.text
                 )  # Contains "1'387 CHF" or "1'900 CHF / m²"
 
-                apartment = {
-                    "title": title,
-                    "price": price_info,
-                    "location": location,
-                    "url": url,
-                }
+                apartment = ApartmentListing(
+                    title=title,
+                    price=price_info,
+                    location=location,
+                    url=url,
+                )
 
                 apartments.append(apartment)
             except Exception as e:
@@ -165,10 +174,9 @@ class FlatfoxScraper(Scraper):
         )
         return apartments
 
-    def get_apartment_details(self, apartment_url: str) -> Dict[str, Any]:
+    def get_apartment_details(self, apartment: ApartmentListing) -> ApartmentDetails:
         """Fetch detailed information about an apartment"""
-        print(f"Fetching details for: {apartment_url}")
-        self.driver.get(apartment_url)
+        self.driver.get(apartment.url)
 
         # Wait for the page to load
         WebDriverWait(self.driver, 1).until(
@@ -177,12 +185,12 @@ class FlatfoxScraper(Scraper):
 
         try:
             self.driver.find_element(By.ID, "onetrust-accept-btn-handler").click()
-        except:
+        except Exception:
             # Cookie button might not appear if cookies are already accepted
             pass
 
         # Extract detailed information
-        details = {}
+        details = apartment.model_dump()
 
         # Try the new title structure first, then fall back to the old one
         try:
@@ -207,7 +215,7 @@ class FlatfoxScraper(Scraper):
                     if "," in location_part:
                         street, city_info = location_part.split(",", 1)
                         details["street"] = street.strip()
-                        details["city_info"] = city_info.strip()
+                        details["city"] = city_info.strip()
                     else:
                         details["location"] = location_part.strip()
 
@@ -290,7 +298,7 @@ class FlatfoxScraper(Scraper):
             details["description"] = ""
 
         # Extract property details from table
-        property_details = {}
+        property_details: dict[str, str] = {}
         try:
             # Look for the details table
             tables = self.driver.find_elements(By.CSS_SELECTOR, "table.table--rows")
@@ -342,7 +350,13 @@ class FlatfoxScraper(Scraper):
                     details["features"].extend(additional_features)
 
                 if "etage" in property_details:
-                    details["floor"] = property_details["etage"]
+                    floor_str = property_details["etage"].replace(". Etage", "").lower()
+                    if "erdgeschoss" in floor_str:
+                        details["floor"] = 0
+                    elif "parterre" in floor_str:
+                        details["floor"] = 0
+                    else:
+                        details["floor"] = int(floor_str)
 
         except Exception as e:
             print(f"Error extracting property details table: {e}")
@@ -388,34 +402,13 @@ class FlatfoxScraper(Scraper):
 
         details["image_urls"] = image_urls
 
-        return details
+        # Convert the dictionary to an ApartmentDetails object
+        return ApartmentDetails(**details)
+
+    def is_scraped_by_me(self, apartment: ApartmentListing) -> bool:
+        return "flatfox.ch" in apartment.url
 
     def close(self) -> None:
         """Close the browser"""
         if hasattr(self, "driver"):
             self.driver.quit()
-
-
-if __name__ == "__main__":
-    scraper = FlatfoxScraper()
-    try:
-        apartments = scraper.scrape_listings()
-
-        # Save basic apartment data
-        df = pd.DataFrame(apartments)
-        df.to_csv("apartments_basic.csv", index=False)
-        print(
-            f"Saved {len(apartments)} basic apartment listings to apartments_basic.csv"
-        )
-
-        # Get detailed information for the first 5 apartments as a test
-        for i, apt in enumerate(apartments[:5]):
-            details = scraper.get_apartment_details(apt["url"])
-            print(f"Details for apartment {i + 1}:")
-            print(f"Title: {details['title']}")
-            print(f"Features: {details['features']}")
-            print(f"Images: {len(details['image_urls'])}")
-            print("---")
-
-    finally:
-        scraper.close()

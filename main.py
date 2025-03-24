@@ -2,8 +2,9 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 from scrapers.flatfox_scraper import FlatfoxScraper
+from scrapers.immoscout24_scraper import ImmoScout24Scraper
 from tasks.detail_scraping import scrape_details
-from tasks.filter_listings import filter_listings
+from tasks.analyze_listings import analyze_listings
 from tasks.overview_scraping import scrape_overview
 
 
@@ -32,17 +33,19 @@ def main():
 
     existing_df, existing_urls = load_existing_apartments()
 
-    print("Initializing Flatfox Apartment Scraper...")
-    scraper = FlatfoxScraper(existing_urls=existing_urls)
+    flatfox_scraper = FlatfoxScraper(existing_urls=existing_urls)
+    immoscout_scraper = ImmoScout24Scraper(existing_urls=existing_urls)
 
     try:
-        apartments_df, _ = scrape_overview(scraper, existing_df)
-        apartment_details = scrape_details(scraper, apartments_df)
-        filter_listings(apartment_details)
+        apartments = scrape_overview([flatfox_scraper, immoscout_scraper], existing_df)
+        apartment_details = scrape_details(
+            [flatfox_scraper, immoscout_scraper], apartments
+        )
+        analyze_listings(apartment_details)
 
     finally:
         # Clean up
-        scraper.close()
+        flatfox_scraper.close()
 
 
 if __name__ == "__main__":

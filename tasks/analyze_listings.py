@@ -1,11 +1,13 @@
 import json
-from apartment_filter import ApartmentFilter
 from config import CRITERIA
 from image_analyzer import ImageAnalyzer
 import pandas as pd
+from tqdm import tqdm
+
+from models.apartment_models import ApartmentDetails, ApartmentAnalyzed, FilterResult
 
 
-def filter_listings(apartment_details: list[dict[str, any]]):
+def analyze_listings(apartment_details: list[ApartmentDetails]):
     # Step 2: Initialize image analyzer
     print("Initializing image analyzer...")
     image_analyzer = ImageAnalyzer()
@@ -14,40 +16,43 @@ def filter_listings(apartment_details: list[dict[str, any]]):
     print("Setting up apartment filter with criteria:")
     for criterion, value in CRITERIA.items():
         print(f"  - {criterion}: {value}")
-    apartment_filter = ApartmentFilter(image_analyzer)
 
     # Step 4: Process each apartment
     print("\nProcessing apartments (this may take some time)...")
-    results = []
+    criteria_results = []
 
     # For demo purposes, limit to first 10 apartments
     processing_limit = min(10, len(apartment_details))
-    print(f"Will process first {processing_limit} apartments as a demo...")
 
-    for i, apt in enumerate(apartment_details[:processing_limit]):
-        print(f"\nProcessing apartment {i + 1}/{processing_limit}: {apt['title']}")
+    for i, apt in tqdm(enumerate(apartment_details)):
+        # print(f"\nProcessing apartment {i + 1}/{processing_limit}: {apt['title']}")
 
         # Filter apartment
-        filter_result = apartment_filter.filter_apartment(apt)
+        met_criteria, apartment_summary = image_analyzer.analyze(apt)
+        # Check if all criteria are met
+        all_criteria_met = all(met_criteria.values())
 
         # Store results
-        apartment_result = {
-            **apt,
-            "filter_result": filter_result,
-        }
+        apartment_result = ApartmentAnalyzed(
+            **apt.model_dump(),
+            apartment_summary=apartment_summary,
+            filter_result=FilterResult(
+                meets_all_criteria=all_criteria_met,
+                criteria_results=met_criteria,
+            ),
+        )
 
-        results.append(apartment_result)
+        criteria_results.append(apartment_result)
 
         # Print result summary
-        criteria_results = filter_result["criteria_results"]
-        print(f"Results for: {apt['title']} {apt['url']}")
-        print(f"  - Meets all criteria: {filter_result['meets_all_criteria']}")
-        for criterion, met in criteria_results.items():
+        print(f"Results for: {apt.title} {apt.url}")
+        print(f"  - Meets all criteria: {all_criteria_met}")
+        for criterion, met in met_criteria.items():
             print(f"  - {criterion}: {'✓' if met else '✗'}")
 
     # Step 5: Save final results
     filtered_apartments = [
-        apt for apt in results if apt["filter_result"]["meets_all_criteria"]
+        apt for apt in criteria_results if apt["filter_result"]["meets_all_criteria"]
     ]
 
     # Save as JSON
@@ -56,14 +61,15 @@ def filter_listings(apartment_details: list[dict[str, any]]):
 
     # Save as CSV
     flat_results = []
-    for apt in results:
+    for apt in criteria_results:
         flat_apt = {
             "title": apt["title"],
-            "price_details": apt["price_details"],
-            "street": apt["street"],
-            "city_info": apt["city_info"],
+            "price_details": apt.get("price_details", ""),
+            "street": apt.get("street", ""),
+            "city_info": apt.get("city_info", ""),
             "url": apt["url"],
             "meets_all_criteria": apt["filter_result"]["meets_all_criteria"],
+            "apartment_summary": apt["apartment_summary"],
         }
 
         # Add criteria results
